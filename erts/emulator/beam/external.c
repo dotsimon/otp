@@ -1,19 +1,19 @@
 /*
  * %CopyrightBegin%
- * 
- * Copyright Ericsson AB 1996-2009. All Rights Reserved.
- * 
+ *
+ * Copyright Ericsson AB 1996-2010. All Rights Reserved.
+ *
  * The contents of this file are subject to the Erlang Public License,
  * Version 1.1, (the "License"); you may not use this file except in
  * compliance with the License. You should have received a copy of the
  * Erlang Public License along with this software. If not, it can be
  * retrieved online at http://www.erlang.org/.
- * 
+ *
  * Software distributed under the License is distributed on an "AS IS"
  * basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
  * the License for the specific language governing rights and limitations
  * under the License.
- * 
+ *
  * %CopyrightEnd%
  */
 
@@ -1013,6 +1013,34 @@ term_to_binary_2(Process* p, Eterm Term, Eterm Flags)
     return erts_term_to_binary(p, Term, level, flags);
 }
 
+static uLongf binary2term_uncomp_size(byte* data, Sint size)
+{
+    z_stream stream;
+    int err;
+    const uInt chunk_size = 64*1024;  /* Ask tmp-alloc about a suitable size? */
+    void* tmp_buf = erts_alloc(ERTS_ALC_T_TMP, chunk_size);
+    uLongf uncomp_size = 0;
+
+    stream.next_in = (Bytef*)data;
+    stream.avail_in = (uInt)size;
+    stream.next_out = tmp_buf;
+    stream.avail_out = (uInt)chunk_size;
+
+    erl_zlib_alloc_init(&stream);
+
+    err = inflateInit(&stream);
+    if (err == Z_OK) {
+	while ((err = inflate(&stream, Z_NO_FLUSH)) == Z_OK) {
+	    uncomp_size += chunk_size - stream.avail_out;
+	    stream.next_out = tmp_buf;
+	    stream.avail_out = chunk_size;
+	}
+	inflateEnd(&stream);
+    }
+    erts_free(ERTS_ALC_T_TMP, tmp_buf);
+    return err == Z_STREAM_END ? uncomp_size : 0;
+}
+
 static ERTS_INLINE Sint
 binary2term_prepare(ErtsBinary2TermState *state, byte *data, Sint data_size)
 {
@@ -1036,10 +1064,18 @@ binary2term_prepare(ErtsBinary2TermState *state, byte *data, Sint data_size)
 	state->extp = bytes;
     }
     else  {
-	uLongf dest_len = get_int32(bytes+1);
-	state->extp = erts_alloc(ERTS_ALC_T_TMP, dest_len);
+	uLongf dest_len = (Uint32) get_int32(bytes+1);
+	bytes += 5;
+	size -= 5;	
+	if (dest_len > 32*1024*1024
+	    || (state->extp = erts_alloc_fnf(ERTS_ALC_T_TMP, dest_len)) == NULL) {
+	    if (dest_len != binary2term_uncomp_size(bytes, size)) {
+		goto error;
+	    }
+	    state->extp = erts_alloc(ERTS_ALC_T_TMP, dest_len);
+	}
 	state->exttmp = 1;
-	if (erl_zlib_uncompress(state->extp, &dest_len, bytes+5, size-5) != Z_OK)
+	if (erl_zlib_uncompress(state->extp, &dest_len, bytes, size) != Z_OK)
 	    goto error;
 	size = (Sint) dest_len;
     }
@@ -1059,10 +1095,10 @@ binary2term_abort(ErtsBinary2TermState *state)
 }
 
 static ERTS_INLINE Eterm
-binary2term_create(ErtsBinary2TermState *state, Eterm **hpp, ErlOffHeap *ohp)
+binary2term_create(ErtsDistExternal *edep, ErtsBinary2TermState *state, Eterm **hpp, ErlOffHeap *ohp)
 {
     Eterm res;
-    if (!dec_term(NULL, hpp, state->extp, ohp, &res))
+    if (!dec_term(edep, hpp, state->extp, ohp, &res))
 	res = THE_NON_VALUE;
     if (state->exttmp) {
 	state->exttmp = 0;
@@ -1086,7 +1122,7 @@ erts_binary2term_abort(ErtsBinary2TermState *state)
 Eterm
 erts_binary2term_create(ErtsBinary2TermState *state, Eterm **hpp, ErlOffHeap *ohp)
 {
-    return binary2term_create(state, hpp, ohp);
+    return binary2term_create(NULL,state, hpp, ohp);
 }
 
 BIF_RETTYPE binary_to_term_1(BIF_ALIST_1)
@@ -1114,7 +1150,67 @@ BIF_RETTYPE binary_to_term_1(BIF_ALIST_1)
     hp = HAlloc(BIF_P, heap_size);
     endp = hp + heap_size;
 
-    res = binary2term_create(&b2ts, &hp, &MSO(BIF_P));
+    res = binary2term_create(NULL, &b2ts, &hp, &MSO(BIF_P));
+
+    erts_free_aligned_binary_bytes(temp_alloc);
+
+    if (hp > endp) {
+	erl_exit(1, ":%s, line %d: heap overrun by %d words(s)\n",
+		 __FILE__, __LINE__, hp-endp);
+    }
+
+    HRelease(BIF_P, endp, hp);
+
+    if (res == THE_NON_VALUE)
+	goto error;
+
+    return res;
+}
+
+BIF_RETTYPE binary_to_term_2(BIF_ALIST_2)
+{
+    Sint heap_size;
+    Eterm res;
+    Eterm opts;
+    Eterm opt;
+    Eterm* hp;
+    Eterm* endp;
+    Sint size;
+    byte* bytes;
+    byte* temp_alloc = NULL;
+    ErtsBinary2TermState b2ts;
+    ErtsDistExternal fakedep;
+
+    fakedep.flags = 0;
+    opts = BIF_ARG_2;
+    while (is_list(opts)) {
+        opt = CAR(list_val(opts));
+        if (opt == am_safe) {
+	    fakedep.flags |= ERTS_DIST_EXT_BTT_SAFE;
+        } else {
+            goto error;
+        }
+        opts = CDR(list_val(opts));
+    }
+
+    if (is_not_nil(opts))
+        goto error;
+
+    if ((bytes = erts_get_aligned_binary_bytes(BIF_ARG_1, &temp_alloc)) == NULL) {
+    error:
+	erts_free_aligned_binary_bytes(temp_alloc);
+	BIF_ERROR(BIF_P, BADARG);
+    }
+    size = binary_size(BIF_ARG_1);
+
+    heap_size = binary2term_prepare(&b2ts, bytes, size);
+    if (heap_size < 0)
+	goto error;
+
+    hp = HAlloc(BIF_P, heap_size);
+    endp = hp + heap_size;
+
+    res = binary2term_create(&fakedep, &b2ts, &hp, &MSO(BIF_P));
 
     erts_free_aligned_binary_bytes(temp_alloc);
 
@@ -1300,7 +1396,7 @@ dec_atom(ErtsDistExternal *edep, byte* ep, Eterm* objp)
 
     switch (*ep++) {
     case ATOM_CACHE_REF:
-	if (!(edep->flags & ERTS_DIST_EXT_ATOM_TRANS_TAB))
+	if (!(edep && (edep->flags & ERTS_DIST_EXT_ATOM_TRANS_TAB)))
 	    goto error;
 	n = get_int8(ep);
 	ep++;
@@ -1312,13 +1408,18 @@ dec_atom(ErtsDistExternal *edep, byte* ep, Eterm* objp)
     case ATOM_EXT:
 	len = get_int16(ep),
 	ep += 2;
-	*objp = am_atom_put((char*)ep, len);
-	ep += len;
-	break;
+        goto dec_atom_common;
     case SMALL_ATOM_EXT:
 	len = get_int8(ep);
 	ep++;
-	*objp = am_atom_put((char*)ep, len);
+    dec_atom_common:
+        if (edep && (edep->flags & ERTS_DIST_EXT_BTT_SAFE)) {
+	    if (!erts_atom_get((char*)ep, len, objp)) {
+                goto error;
+	    }
+        } else {
+            *objp = am_atom_put((char*)ep, len);
+        }
 	ep += len;
 	break;
     default:
@@ -1775,9 +1876,80 @@ is_external_string(Eterm list, int* p_is_string)
     return len;
 }
 
+/* Assumes that the ones to undo are preluding the lists. */ 
+static void
+undo_offheap_in_area(ErlOffHeap* off_heap, Eterm* start, Eterm* end)
+{
+    const Uint area_sz = (end - start) * sizeof(Eterm);
+    struct proc_bin* mso;
+    struct proc_bin** mso_nextp = NULL;
+#ifndef HYBRID /* FIND ME! */
+    struct erl_fun_thing* funs;
+    struct erl_fun_thing** funs_nextp = NULL;
+#endif
+    struct external_thing_* ext;
+    struct external_thing_** ext_nextp = NULL;
+
+    for (mso = off_heap->mso; ; mso=mso->next) {
+	if (!in_area(mso, start, area_sz)) {
+	    if (mso_nextp != NULL) {
+		*mso_nextp = NULL;
+		erts_cleanup_mso(off_heap->mso);
+		off_heap->mso = mso;
+	    }
+	    break;
+	}
+	mso_nextp = &mso->next;
+    }    
+
+#ifndef HYBRID /* FIND ME! */
+    for (funs = off_heap->funs; ; funs=funs->next) {
+	if (!in_area(funs, start, area_sz)) {
+	    if (funs_nextp != NULL) {
+		*funs_nextp = NULL;
+		erts_cleanup_funs(off_heap->funs);
+		off_heap->funs = funs;
+	    }
+	    break;
+	}
+	funs_nextp = &funs->next;
+    }    
+#endif
+    for (ext = off_heap->externals; ; ext=ext->next) {
+	if (!in_area(ext, start, area_sz)) {
+	    if (ext_nextp != NULL) {
+		*ext_nextp = NULL;
+		erts_cleanup_externals(off_heap->externals);
+		off_heap->externals = ext;
+	    }
+	    break;
+	}
+	ext_nextp = &ext->next;
+    }
+
+    /* Assert that the ones to undo were indeed preluding the lists. */ 
+#ifdef DEBUG
+    for (mso = off_heap->mso; mso != NULL; mso=mso->next) {
+	ASSERT(!in_area(mso, start, area_sz));
+    }    
+# ifndef HYBRID /* FIND ME! */
+    for (funs = off_heap->funs; funs != NULL; funs=funs->next) {
+	ASSERT(!in_area(funs, start, area_sz));
+    }    
+# endif
+    for (ext = off_heap->externals; ext != NULL; ext=ext->next) {
+	ASSERT(!in_area(ext, start, area_sz));
+    }    
+#endif /* DEBUG */
+}
+
+/* Decode term from external format into *objp.
+** On failure return NULL and (R13B04) *hpp will be unchanged.
+*/
 static byte*
 dec_term(ErtsDistExternal *edep, Eterm** hpp, byte* ep, ErlOffHeap* off_heap, Eterm* objp)
 {
+    Eterm* hp_saved = *hpp;
     int n;
     register Eterm* hp = *hpp;	/* Please don't take the address of hp */
     Eterm* next = objp;
@@ -1864,13 +2036,18 @@ dec_term(ErtsDistExternal *edep, Eterm** hpp, byte* ep, ErlOffHeap* off_heap, Et
 	case ATOM_EXT:
 	    n = get_int16(ep);
 	    ep += 2;
-	    *objp = am_atom_put((char*)ep, n);
-	    ep += n;
-	    break;
+            goto dec_term_atom_common;
 	case SMALL_ATOM_EXT:
 	    n = get_int8(ep);
 	    ep++;
-	    *objp = am_atom_put((char*)ep, n);
+dec_term_atom_common:
+	    if (edep && (edep->flags & ERTS_DIST_EXT_BTT_SAFE)) {
+		if (!erts_atom_get((char*)ep, n, objp)) {
+		    goto error;
+		}
+	    } else {
+	        *objp = am_atom_put((char*)ep, n);
+	    }
 	    ep += n;
 	    break;
 	case LARGE_TUPLE_EXT:
@@ -1973,7 +2150,7 @@ dec_term(ErtsDistExternal *edep, Eterm** hpp, byte* ep, ErlOffHeap* off_heap, Et
 	    ep = dec_pid(edep, hpp, ep, off_heap, objp);
 	    hp = *hpp;
 	    if (ep == NULL) {
-		return NULL;
+		goto error;
 	    }
 	    break;
 	case PORT_EXT:
@@ -2039,7 +2216,6 @@ dec_term(ErtsDistExternal *edep, Eterm** hpp, byte* ep, ErlOffHeap* off_heap, Et
 		goto ref_ext_common;
 
 	    case NEW_REFERENCE_EXT:
-
 		ref_words = get_int16(ep);
 		ep += 2;
 
@@ -2209,7 +2385,7 @@ dec_term(ErtsDistExternal *edep, Eterm** hpp, byte* ep, ErlOffHeap* off_heap, Et
 		ep = dec_term(edep, hpp, ep, off_heap, &temp);
 		hp = *hpp;
 		if (ep == NULL) {
-		    return NULL;
+		    goto error;
 		}
 		if (!is_small(temp)) {
 		    goto error;
@@ -2218,6 +2394,10 @@ dec_term(ErtsDistExternal *edep, Eterm** hpp, byte* ep, ErlOffHeap* off_heap, Et
 		if (arity < 0) {
 		    goto error;
 		}
+		if (edep && (edep->flags & ERTS_DIST_EXT_BTT_SAFE)) {
+		    if (!erts_find_export_entry(mod, name, arity))
+			goto error;
+                }
 		*objp = make_export(hp);
 		*hp++ = HEADER_EXPORT;
 		*hp++ = (Eterm) erts_export_get_or_make_stub(mod, name, arity);
@@ -2235,8 +2415,6 @@ dec_term(ErtsDistExternal *edep, Eterm** hpp, byte* ep, ErlOffHeap* off_heap, Et
 		Sint old_index;
 		unsigned num_free;
 		int i;
-		Eterm* temp_hp;
-		Eterm** hpp = &temp_hp;
 		Eterm temp;
 
 		ep += 4;	/* Skip total size in bytes */
@@ -2248,23 +2426,16 @@ dec_term(ErtsDistExternal *edep, Eterm** hpp, byte* ep, ErlOffHeap* off_heap, Et
 		num_free = get_int32(ep);
 		ep += 4;
 		hp += ERL_FUN_SIZE;
-		if (num_free > 0) {
-		    /* Don't leave a hole in case we fail */
-		    *hp = make_pos_bignum_header(num_free-1);
-		}
 		hp += num_free;
-		*hpp = hp;
 		funp->thing_word = HEADER_FUN;
 		funp->num_free = num_free;
-		funp->creator = NIL; /* Don't leave a hole in case we fail */
 		*objp = make_fun(funp);
 
 		/* Module */
-		if ((ep = dec_atom(edep, ep, &temp)) == NULL) {
+		if ((ep = dec_atom(edep, ep, &module)) == NULL) {
 		    goto error;
 		}
-		module = temp;
-
+		*hpp = hp;
 		/* Index */
 		if ((ep = dec_term(edep, hpp, ep, off_heap, &temp)) == NULL) {
 		    goto error;
@@ -2321,17 +2492,11 @@ dec_term(ErtsDistExternal *edep, Eterm** hpp, byte* ep, ErlOffHeap* off_heap, Et
 		Sint old_index;
 		unsigned num_free;
 		int i;
-		Eterm* temp_hp;
-		Eterm** hpp = &temp_hp;
 		Eterm temp;
 
 		num_free = get_int32(ep);
 		ep += 4;
 		hp += ERL_FUN_SIZE;
-		if (num_free > 0) {
-		    /* Don't leave a hole in the heap in case we fail. */
-		    *hp = make_pos_bignum_header(num_free-1);
-		}
 		hp += num_free;
 		*hpp = hp;
 		funp->thing_word = HEADER_FUN;
@@ -2339,23 +2504,16 @@ dec_term(ErtsDistExternal *edep, Eterm** hpp, byte* ep, ErlOffHeap* off_heap, Et
 		*objp = make_fun(funp);
 
 		/* Creator pid */
-		switch(*ep) {
-		case PID_EXT:
-		    ep = dec_pid(edep, hpp, ++ep, off_heap, &funp->creator);
-		    if (ep == NULL) {
-			funp->creator = NIL; /* Don't leave a hole in the heap */
-			goto error;
-		    }
-		    break;
-		default:
+		if (*ep != PID_EXT 
+		    || (ep = dec_pid(edep, hpp, ++ep, off_heap,
+				     &funp->creator))==NULL) { 
 		    goto error;
 		}
 
 		/* Module */
-		if ((ep = dec_atom(edep, ep, &temp)) == NULL) {
+		if ((ep = dec_atom(edep, ep, &module)) == NULL) {
 		    goto error;
 		}
-		module = temp;
 
 		/* Index */
 		if ((ep = dec_term(edep, hpp, ep, off_heap, &temp)) == NULL) {
@@ -2382,7 +2540,6 @@ dec_term(ErtsDistExternal *edep, Eterm** hpp, byte* ep, ErlOffHeap* off_heap, Et
 		funp->next = off_heap->funs;
 		off_heap->funs = funp;
 #endif
-
 		old_uniq = unsigned_val(temp);
 
 		funp->fe = erts_put_fun_entry(module, old_uniq, old_index);
@@ -2401,12 +2558,15 @@ dec_term(ErtsDistExternal *edep, Eterm** hpp, byte* ep, ErlOffHeap* off_heap, Et
 	    }
 	default:
 	error:
-	    /*
-	     * Be careful to return the updated heap pointer, to avoid
-	     * that the caller wipes out binaries or other off-heap objects
-	     * that may have been linked into the process.
+	    /* UNDO:
+	     * Must unlink all off-heap objects that may have been
+	     * linked into the process. 
 	     */
-	    *hpp = hp;
+	    if (hp < *hpp) { /* Sometimes we used hp and sometimes *hpp */
+		hp = *hpp;   /* the largest must be the freshest */
+	    }
+	    undo_offheap_in_area(off_heap, hp_saved, hp);
+	    *hpp = hp_saved;
 	    return NULL;
 	}
     }

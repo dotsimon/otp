@@ -1,19 +1,19 @@
 /*
  * %CopyrightBegin%
- * 
- * Copyright Ericsson AB 1996-2009. All Rights Reserved.
- * 
+ *
+ * Copyright Ericsson AB 1996-2010. All Rights Reserved.
+ *
  * The contents of this file are subject to the Erlang Public License,
  * Version 1.1, (the "License"); you may not use this file except in
  * compliance with the License. You should have received a copy of the
  * Erlang Public License along with this software. If not, it can be
  * retrieved online at http://www.erlang.org/.
- * 
+ *
  * Software distributed under the License is distributed on an "AS IS"
  * basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
  * the License for the specific language governing rights and limitations
  * under the License.
- * 
+ *
  * %CopyrightEnd%
  */
 
@@ -477,6 +477,7 @@ struct ErtsPendingSuspend_ {
 #  define MSO(p)            (p)->off_heap
 #  define MIN_HEAP_SIZE(p)  (p)->min_heap_size
 
+#  define MIN_VHEAP_SIZE(p)   (p)->min_vheap_size
 #  define BIN_VHEAP_SZ(p)     (p)->bin_vheap_sz
 #  define BIN_OLD_VHEAP_SZ(p) (p)->bin_old_vheap_sz
 #  define BIN_OLD_VHEAP(p)    (p)->bin_old_vheap
@@ -495,6 +496,7 @@ struct process {
     Eterm* hend;		/* Heap end */
     Uint heap_sz;		/* Size of heap in words */
     Uint min_heap_size;         /* Minimum size of heap (in words). */
+    Uint min_vheap_size;        /* Minimum size of virtual heap (in words). */
 
 #if !defined(NO_FPE_SIGNALS)
     volatile unsigned long fp_exception;
@@ -654,6 +656,11 @@ struct process {
 				 * heap fragments.
 				 */
 #endif
+
+#ifdef FORCE_HEAP_FRAGS
+    Uint space_verified;        /* Avoid HAlloc forcing heap fragments when */ 
+    Eterm* space_verified_from; /* we rely on available heap space (TestHeap) */
+#endif
 };
 
 #ifdef CHECK_FOR_HOLES
@@ -725,8 +732,8 @@ typedef struct {
      * The following items are only initialized if the SPO_USE_ARGS flag is set.
      */
     Uint min_heap_size;		/* Minimum heap size (must be a valued returned
-				 * from next_heap_size()).
-				 */
+				 * from next_heap_size()).  */
+    Uint min_vheap_size;	/* Minimum virtual heap size  */
     int priority;		/* Priority for process. */
     Uint16 max_gen_gcs;		/* Maximum number of gen GCs before fullsweep. */
     int scheduler;
@@ -738,7 +745,20 @@ typedef struct {
 
 #define KILL_CATCHES(p) (p)->catches = -1
 
-void erts_arith_shrink(Process* p, Eterm* hp);
+/* Shrink heap fragment from _last_ HAlloc.
+*/
+ERTS_GLB_INLINE void erts_heap_frag_shrink(Process* p, Eterm* hp);
+#if ERTS_GLB_INLINE_INCL_FUNC_DEF
+ERTS_GLB_INLINE void erts_heap_frag_shrink(Process* p, Eterm* hp)
+{
+    ErlHeapFragment* hf = MBUF(p);
+
+    ASSERT(hf!=NULL && (hp - hf->mem < (unsigned long)hf->size));
+
+    hf->used_size = hp - hf->mem;
+}	
+#endif /* inline */
+
 Eterm* erts_heap_alloc(Process* p, Uint need);
 #ifdef CHECK_FOR_HOLES
 Eterm* erts_set_hole_marker(Eterm* ptr, Uint sz);

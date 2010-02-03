@@ -1,19 +1,19 @@
 /*
  * %CopyrightBegin%
- * 
- * Copyright Ericsson AB 2008-2009. All Rights Reserved.
- * 
+ *
+ * Copyright Ericsson AB 2008-2010. All Rights Reserved.
+ *
  * The contents of this file are subject to the Erlang Public License,
  * Version 1.1, (the "License"); you may not use this file except in
  * compliance with the License. You should have received a copy of the
  * Erlang Public License along with this software. If not, it can be
  * retrieved online at http://www.erlang.org/.
- * 
+ *
  * Software distributed under the License is distributed on an "AS IS"
  * basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
  * the License for the specific language governing rights and limitations
  * under the License.
- * 
+ *
  * %CopyrightEnd%
  */
 
@@ -884,7 +884,7 @@ re_run_3(BIF_ALIST_3)
 	    int capture_count;
 
 	    if (pflags & PARSE_FLAG_UNICODE && 
-		(!is_binary(BIF_ARG_1) || 
+		(!is_binary(BIF_ARG_2) || !is_binary(BIF_ARG_1) ||
 		 (is_list_cap && !(pflags & PARSE_FLAG_GLOBAL)))) { 
 		BIF_TRAP3(urun_trap_exportp, BIF_P, BIF_ARG_1, BIF_ARG_2, BIF_ARG_3);
 	    }
@@ -1020,6 +1020,9 @@ re_run_3(BIF_ALIST_3)
 	    goto handle_iolist;
 	}
 	pb = (ProcBin *) bptr;
+	if (pb->flags) {
+	    erts_emasculate_writable_binary(pb);
+	}
 	restart.subject = (char *) (pb->bytes+offset);
 	restart.flags |= RESTART_FLAG_SUBJECT_IN_BINARY;
     } else {

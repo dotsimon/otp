@@ -1,19 +1,19 @@
 %%
 %% %CopyrightBegin%
-%% 
-%% Copyright Ericsson AB 1996-2009. All Rights Reserved.
-%% 
+%%
+%% Copyright Ericsson AB 1996-2010. All Rights Reserved.
+%%
 %% The contents of this file are subject to the Erlang Public License,
 %% Version 1.1, (the "License"); you may not use this file except in
 %% compliance with the License. You should have received a copy of the
 %% Erlang Public License along with this software. If not, it can be
 %% retrieved online at http://www.erlang.org/.
-%% 
+%%
 %% Software distributed under the License is distributed on an "AS IS"
 %% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
 %% the License for the specific language governing rights and limitations
 %% under the License.
-%% 
+%%
 %% %CopyrightEnd%
 %%
 %% Purpose: Run the Erlang compiler.
@@ -187,9 +187,9 @@ format_error(no_crypto_key) ->
 format_error({native, E}) ->
     io_lib:fwrite("native-code compilation failed with reason: ~P.",
 		  [E, 25]);
-format_error({native_crash, E}) ->
-    io_lib:fwrite("native-code compilation crashed with reason: ~P.",
-		  [E, 25]);
+format_error({native_crash,E,Stk}) ->
+    io_lib:fwrite("native-code compilation crashed with reason: ~P.\n~P\n",
+		  [E,25,Stk,25]);
 format_error({open,E}) ->
     io_lib:format("open error '~s'", [file:format_error(E)]);
 format_error({epp,E}) ->
@@ -302,7 +302,7 @@ os_process_size() ->
 	    list_to_integer(lib:nonl(Size));
 	_ ->
 	    0
-    end.	    
+    end.
 
 run_tc({Name,Fun}, St) ->
     Before0 = statistics(runtime),
@@ -318,17 +318,30 @@ run_tc({Name,Fun}, St) ->
     Val.
 
 comp_ret_ok(#compile{code=Code,warnings=Warn0,module=Mod,options=Opts}=St) ->
-    Warn = messages_per_file(Warn0),
-    report_warnings(St#compile{warnings = Warn}),
-    Ret1 = case member(binary, Opts) andalso not member(no_code_generation, Opts) of
-	       true -> [Code];
-	       false -> []
-	   end,
-    Ret2 = case member(return_warnings, Opts) of
-	       true -> Ret1 ++ [Warn];
-	       false -> Ret1
-	   end,
-    list_to_tuple([ok,Mod|Ret2]).
+    case member(warnings_as_errors, Opts) andalso length(Warn0) > 0 of
+        true ->
+            case member(report_warnings, Opts) of
+                true ->
+		    io:format("~p: warnings being treated as errors\n",
+			      [?MODULE]);
+                false ->
+		    ok
+            end,
+            comp_ret_err(St);
+        false ->
+            Warn = messages_per_file(Warn0),
+            report_warnings(St#compile{warnings = Warn}),
+            Ret1 = case member(binary, Opts) andalso
+		       not member(no_code_generation, Opts) of
+                       true -> [Code];
+                       false -> []
+                   end,
+            Ret2 = case member(return_warnings, Opts) of
+                       true -> Ret1 ++ [Warn];
+                       false -> Ret1
+                   end,
+            list_to_tuple([ok,Mod|Ret2])
+    end.
 
 comp_ret_err(#compile{warnings=Warn0,errors=Err0,options=Opts}=St) ->
     Warn = messages_per_file(Warn0),
@@ -344,18 +357,18 @@ comp_ret_err(#compile{warnings=Warn0,errors=Err0,options=Opts}=St) ->
 messages_per_file(Ms) ->
     T = lists:sort([{File,M} || {File,Messages} <- Ms, M <- Messages]),
     PrioMs = [erl_scan, epp, erl_parse],
-    {Prio0, Rest} = 
+    {Prio0, Rest} =
         lists:mapfoldl(fun(M, A) ->
                                lists:partition(fun({_,{_,Mod,_}}) -> Mod =:= M;
                                                   (_) -> false
                                                end, A)
                        end, T, PrioMs),
-    Prio = lists:sort(fun({_,{L1,_,_}}, {_,{L2,_,_}}) -> L1 =< L2 end, 
+    Prio = lists:sort(fun({_,{L1,_,_}}, {_,{L2,_,_}}) -> L1 =< L2 end,
                       lists:append(Prio0)),
     flatmap(fun mpf/1, [Prio, Rest]).
 
 mpf(Ms) ->
-    [{File,[M || {F,M} <- Ms, F =:= File]} || 
+    [{File,[M || {F,M} <- Ms, F =:= File]} ||
 	File <- lists:usort([F || {F,_} <- Ms])].
 
 %% passes(form|file, [Option]) -> [{Name,PassFun}]
@@ -495,14 +508,14 @@ select_passes([List|Ps], Opts) when is_list(List) ->
 
 select_cond(Flag, ShouldBe, Pass, Ps, Opts) ->
     ShouldNotBe = not ShouldBe,
-    case member(Flag, Opts) of 
+    case member(Flag, Opts) of
 	ShouldBe    -> select_passes([Pass|Ps], Opts);
 	ShouldNotBe -> select_passes(Ps, Opts)
     end.
 
 %% select_list_passes([Pass], Opts) -> {done,[Pass]} | {not_done,[Pass]}
 %%  Evaluate all conditions having to do with listings in the list of
-%%  passes. 
+%%  passes.
 
 select_list_passes(Ps, Opts) ->
     select_list_passes_1(Ps, Opts, []).
@@ -704,7 +717,7 @@ read_beam_file(St) ->
     case file:read_file(St#compile.ifile) of
 	{ok,Beam} ->
 	    Infile = St#compile.ifile,
-	    case is_too_old(Infile) of
+	    case no_native_compilation(Infile, St) of
 		true ->
 		    {ok,St#compile{module=none,code=none}};
 		false ->
@@ -717,12 +730,15 @@ read_beam_file(St) ->
 	    {error,St#compile{errors=St#compile.errors ++ Es}}
     end.
 
-is_too_old(BeamFile) ->
+no_native_compilation(BeamFile, #compile{options=Opts0}) ->
     case beam_lib:chunks(BeamFile, ["CInf"]) of
 	{ok,{_,[{"CInf",Term0}]}} ->
 	    Term = binary_to_term(Term0),
-	    Opts = proplists:get_value(options, Term, []),
-	    lists:member(no_new_funs, Opts);
+
+	    %% Compiler options in the beam file will override
+	    %% options passed to the compiler.
+	    Opts = proplists:get_value(options, Term, []) ++ Opts0,
+	    member(no_new_funs, Opts) orelse not is_native_enabled(Opts);
 	_ -> false
     end.
 
@@ -782,7 +798,7 @@ clean_parse_transforms_1([F|Fs], Acc) ->
     clean_parse_transforms_1(Fs, [F|Acc]);
 clean_parse_transforms_1([], Acc) -> reverse(Acc).
 
-transforms(Os) -> [ M || {parse_transform,M} <- Os ]. 
+transforms(Os) -> [ M || {parse_transform,M} <- Os ].
 
 transform_module(#compile{options=Opt,code=Code0}=St0) ->
     %% Extract compile options from code into options field.
@@ -815,7 +831,7 @@ foldl_transform(St, [T|Ts]) ->
     end;
 foldl_transform(St, []) -> {ok,St}.
 
-get_core_transforms(Opts) -> [M || {core_transform,M} <- Opts]. 
+get_core_transforms(Opts) -> [M || {core_transform,M} <- Opts].
 
 core_transforms(St) ->
     %% The options field holds the complete list of options at this
@@ -1033,7 +1049,14 @@ beam_asm(#compile{ifile=File,code=Code0,abstract_code=Abst,options=Opts0}=St) ->
 
 test_native(#compile{options=Opts}) ->
     %% This test is done late, in case some other option has turned off native.
-    member(native, Opts).
+    %% 'native' given on the command line can be overridden by
+    %% 'no_native' in the module itself.
+    is_native_enabled(Opts).
+
+is_native_enabled([native|_]) -> true;
+is_native_enabled([no_native|_]) -> false;
+is_native_enabled([H|T]) -> is_native_enabled(T);
+is_native_enabled([]) -> false.
 
 native_compile(#compile{code=none}=St) -> {ok,St};
 native_compile(St) ->
@@ -1057,25 +1080,27 @@ native_compile_1(St) ->
 		     St#compile.core_code,
 		     St#compile.code,
 		     Opts) of
-	{ok, {_Type,Bin} = T} when is_binary(Bin) ->
-	    {ok, embed_native_code(St, T)};
-	{error, R} ->
+	{ok,{_Type,Bin}=T} when is_binary(Bin) ->
+	    {ok,embed_native_code(St, T)};
+	{error,R} ->
 	    case IgnoreErrors of
 		true ->
-		    Ws = [{St#compile.ifile,[{none,?MODULE,{native,R}}]}],
-		    {ok, St#compile{warnings=St#compile.warnings ++ Ws}};
+		    Ws = [{St#compile.ifile,[{?MODULE,{native,R}}]}],
+		    {ok,St#compile{warnings=St#compile.warnings ++ Ws}};
 		false ->
-		    Es = [{St#compile.ifile,[{none,?MODULE,{native,R}}]}],
-		    {error, St#compile{errors=St#compile.errors ++ Es}}
+		    Es = [{St#compile.ifile,[{?MODULE,{native,R}}]}],
+		    {error,St#compile{errors=St#compile.errors ++ Es}}
 	    end
     catch
-	error:R ->
+	Class:R ->
+	    Stk = erlang:get_stacktrace(),
 	    case IgnoreErrors of
 		true ->
-		    Ws = [{St#compile.ifile,[{none,?MODULE,{native_crash,R}}]}],
-		    {ok, St#compile{warnings=St#compile.warnings ++ Ws}};
+		    Ws = [{St#compile.ifile,
+			   [{?MODULE,{native_crash,R,Stk}}]}],
+		    {ok,St#compile{warnings=St#compile.warnings ++ Ws}};
 		false ->
-		    exit(R)
+		    erlang:raise(Class, R, Stk)
 	    end
     end.
 
@@ -1264,7 +1289,7 @@ listing(Ext, St) ->
 listing(LFun, Ext, St) ->
     Lfile = outfile(St#compile.base, Ext, St#compile.options),
     case file:open(Lfile, [write,delayed_write]) of
-	{ok,Lf} -> 
+	{ok,Lf} ->
             Code = restore_expanded_types(Ext, St#compile.code),
 	    LFun(Lf, Code),
 	    ok = file:close(Lf),
