@@ -81,13 +81,23 @@ connect(S, Addr, Port, Opts) ->
     connect(S, Addr, Port, Opts, infinity).
 
 connect(S, Addr, Port, Opts, Timeout) ->
-    do_connect(S, Addr, Port, Opts, Timeout, true).
+    case do_connect(S, Addr, Port, Opts, Timeout, true) of
+	badarg ->
+	    erlang:error(badarg, [S,Addr,Port,Opts,Timeout]);
+	Result ->
+	    Result
+    end.
 
 connect_init(S, Addr, Port, Opts) ->
     connect_init(S, Addr, Port, Opts, infinity).
 
 connect_init(S, Addr, Port, Opts, Timeout) ->
-    do_connect(S, Addr, Port, Opts, Timeout, false).
+    case do_connect(S, Addr, Port, Opts, Timeout, false) of
+	badarg ->
+	    erlang:error(badarg, [S,Addr,Port,Opts,Timeout]);
+	Result ->
+	    Result
+    end.
 
 do_connect(S, Addr, Port, Opts, Timeout, ConnWait) when is_port(S), is_list(Opts) ->
     case inet_db:lookup_socket(S) of
@@ -110,14 +120,14 @@ do_connect(S, Addr, Port, Opts, Timeout, ConnWait) when is_port(S), is_list(Opts
 			    end
 		    catch
 			error:badarg ->
-			    erlang:error(badarg, [S,Addr,Port,Opts,Timeout])
+			    badarg
 		    end;
 		Error -> Error
 	    end;
 	Error -> Error
     end;
 do_connect(S, Addr, Port, Opts, Timeout, _ConnWait) ->
-    erlang:error(badarg, [S,Addr,Port,Opts,Timeout]).
+    badarg.
 
 
 
