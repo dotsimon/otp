@@ -207,6 +207,13 @@ AS_HELP_STRING([--disable-sctp], [disable sctp support]),
     *)  enable_sctp=yes ;;
   esac ], enable_sctp=unknown)
 
+AC_ARG_ENABLE(sctp-link,
+AS_HELP_STRING([--enable-sctp-link], [enable sctp support at link time]),
+[ case "$enableval" in
+    no) enable_sctp_link=no ;;
+    *)  enable_sctp_link=yes ;;
+  esac ], enable_sctp_link=no)
+
 AC_ARG_ENABLE(hipe,
 AS_HELP_STRING([--enable-hipe], [enable hipe support])
 AS_HELP_STRING([--disable-hipe], [disable hipe support]))
@@ -1790,6 +1797,9 @@ if test "x$enable_sctp" != "xno" ; then
 fi
 
 if test x"$ac_cv_header_netinet_sctp_h" = x"yes"; then
+if test "x$enable_sctp_link" != "xno" ; then
+    AC_SEARCH_LIBS(sctp_bindx, [sctp])
+fi
     AC_CHECK_FUNCS([sctp_bindx sctp_peeloff sctp_getladdrs sctp_freeladdrs sctp_getpaddrs sctp_freepaddrs])
     AC_CHECK_DECLS([SCTP_UNORDERED, SCTP_ADDR_OVER, SCTP_ABORT,
                     SCTP_EOF, SCTP_SENDALL, SCTP_ADDR_CONFIRMED,
