@@ -135,6 +135,9 @@ local_to_univ_utc(Config) when is_list(Config) ->
 %% Tests conversion from universal to local time.
 
 univ_to_local(Config) when is_list(Config) ->
+    test_conversion(univ_to_local, "CET"),
+    test_conversion(univ_to_local, "Africa/Johannesburg");
+univ_to_local(?MODULE) ->
     test_univ_to_local(test_data()).
 
 test_univ_to_local([{Utc, Local}|Rest]) ->
@@ -147,6 +150,9 @@ test_univ_to_local([]) ->
 %% Tests conversion from local to universal time.
 
 local_to_univ(Config) when is_list(Config) ->
+    test_conversion(local_to_univ, "CET"),
+    test_conversion(local_to_univ, "Africa/Johannesburg");
+local_to_univ(?MODULE) ->
     test_local_to_univ(test_data()).
 
 test_local_to_univ([{Utc, Local}|Rest]) ->
@@ -155,6 +161,23 @@ test_local_to_univ([{Utc, Local}|Rest]) ->
     test_local_to_univ(Rest);
 test_local_to_univ([]) ->
     ok.
+
+%% Test conversion helper
+
+test_conversion(Fun, TZ) ->
+    case os:type() of
+	{unix,_} ->
+	    %% TZ variable has a meaning
+            Pa = filename:dirname(code:which(?MODULE)),
+	    {ok, Node} =
+		test_server:start_node(Fun, slave,
+                                       [{args, "-env TZ "++TZ++" -pa "++Pa}]),
+	    ok = rpc:call(Node, ?MODULE, Fun, [?MODULE]),
+            test_server:stop_node(Node);
+	_ ->
+            %% Otherwise fallback to this node (and hope you're in the right TZ)
+	    ok = ?MODULE:Fun(?MODULE)
+    end.
 
 %% Test bad arguments to erlang:universaltime_to_localtime; should
 %% generate a badarg.
