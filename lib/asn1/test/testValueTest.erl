@@ -100,6 +100,8 @@ main() ->
     [c] = M:someNamedBs(),
     [c] = M:someOtherNamedBs(),
 
+    roundtrip('Seq2', M:sos()),
+
     ok.
 
 

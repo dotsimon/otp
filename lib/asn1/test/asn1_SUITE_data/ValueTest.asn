@@ -140,4 +140,23 @@ bsFromObject BIT STRING ::= bs-holder-1.&bs
 someOtherNamedBs NamedBsType ::= someNamedBs
 someNamedBs NamedBsType ::= {c}
 
+-- SEQUENCE OF SEQUENCE
+Seq1 ::= SEQUENCE {
+  int INTEGER
+}
+
+Seq2 ::= SEQUENCE {
+  seq1 SEQUENCE OF Seq1,
+  nullopt NULL OPTIONAL
+}
+
+
+sos Seq2 ::= {
+  seq1 {
+    {
+      int 10
+    }
+  }
+}
+
 END
