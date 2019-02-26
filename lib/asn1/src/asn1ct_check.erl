@@ -1714,6 +1714,10 @@ check_value(S, #valuedef{}=V) ->
     case V of
 	#valuedef{checked=true} ->
 	    V;
+	#valuedef{value = [{pv,{simpledefinedvalue,
+				#'Externalvaluereference'{pos = Pos, module = Module, value = Val}},Args}]} ->
+	    Value1 = [{#seqtag{pos = Pos, module = Module, val = Val}, Args}],
+	    check_value(S, V#valuedef{value = Value1});
 	#valuedef{checked=false} ->
 	    check_valuedef(S, V)
     end.
