@@ -79,7 +79,21 @@
       </desc>
     </datatype>
     <datatype>
-      <name>setoption()</name>
+      <name name="setoption"/>
+      <desc>
+        <p>One of the
+          <seeerl marker="#options">SCTP Socket Options</seeerl> used to set an option.</p>
+      </desc>
+    </datatype>
+    <datatype>
+      <name name="getoption"/>
+      <desc>
+        <p>One of the
+          <seeerl marker="#options">SCTP Socket Options</seeerl> or name used to get an option.</p>
+      </desc>
+    </datatype>
+    <datatype>
+      <name name="optionval"/>
       <desc>
         <p>One of the
           <seeerl marker="#options">SCTP Socket Options</seeerl>.</p>
