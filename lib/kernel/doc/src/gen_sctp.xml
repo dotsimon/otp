@@ -100,6 +100,18 @@
       </desc>
     </datatype>
     <datatype>
+      <name name="elementary_option"/>
+    </datatype>
+    <datatype>
+      <name name="elementary_option_name"/>
+    </datatype>
+    <datatype>
+      <name name="record_option"/>
+    </datatype>
+    <datatype>
+      <name name="ro_option"/>
+    </datatype>
+    <datatype>
       <name>sctp_socket()</name>
       <desc>
         <p>Socket identifier returned from
